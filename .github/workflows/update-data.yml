@@ -1,0 +1,71 @@
+# Coloque este arquivo em:  .github/workflows/update-data.yml
+#
+# Atualiza squad.json / pool.json semanalmente e faz commit de volta no repo,
+# o que dispara um novo deploy automático no Vercel.
+#
+# ATENÇÃO: o FBref usa rate limiting e pode bloquear IPs de datacenter (o caso
+# dos runners do GitHub). Se a etapa do FBref falhar com frequência, rode o
+# pipeline localmente e faça commit dos JSON à mão — é o caminho mais confiável.
+
+name: Atualizar dados do Galo Scout
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"      # toda segunda, 06:00 UTC
+  workflow_dispatch: {}        # permite rodar manualmente pelo painel do GitHub
+
+jobs:
+  build-snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      - name: Subir o serviço de valores (transfermarkt-api)
+        run: |
+          git clone --depth 1 https://github.com/felipeall/transfermarkt-api.git tm-api
+          docker build -t transfermarkt-api ./tm-api
+          docker run -d -p 8000:8000 --name tm transfermarkt-api
+          # espera o serviço responder
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:8000/ >/dev/null; then echo "TM no ar"; break; fi
+            sleep 3
+          done
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: pip install -r data-pipeline/requirements.txt
+
+      - name: (Opcional) Adicionar Brasileirão ao FBref
+        run: |
+          mkdir -p ~/soccerdata/config
+          cat > ~/soccerdata/config/league_dict.json <<'JSON'
+          {
+            "BRA-Série A": {
+              "FBref": "Campeonato Brasileiro Série A",
+              "season_start": "Jan",
+              "season_end": "Dec"
+            }
+          }
+          JSON
+
+      - name: Gerar snapshot
+        working-directory: data-pipeline
+        run: python build_snapshot.py
+        continue-on-error: false
+
+      - name: Commit dos JSON atualizados
+        run: |
+          git config user.name "galo-scout-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add public/data/squad.json public/data/pool.json
+          if git diff --staged --quiet; then
+            echo "Sem mudanças nos dados."
+          else
+            git commit -m "chore: atualiza snapshot de dados [skip ci]"
+            git push
+          fi

@@ -1,0 +1,5 @@
+soccerdata>=1.9.0
+pandas>=2.0
+requests>=2.31
+rapidfuzz>=3.0
+unidecode>=1.3

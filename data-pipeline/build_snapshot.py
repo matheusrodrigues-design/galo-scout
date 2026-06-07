@@ -1,0 +1,376 @@
+# -*- coding: utf-8 -*-
+"""
+build_snapshot.py — gera squad.json e pool.json para o Galo Scout.
+
+Lógica:
+  1) Espinha = Transfermarkt (transfermarkt-api self-hosted): universo de
+     jogadores das competições do escopo, com posição detalhada, idade,
+     nacionalidade, valor de mercado e contrato.
+  2) Enriquecimento = FBref via soccerdata: gols, assist., xG, xA, passes-chave,
+     desarmes, etc. (onde a liga existir no soccerdata).
+  3) Casamento Transfermarkt <-> FBref por nome (fuzzy) dentro de cada liga.
+  4) Nota derivada por posição (FBref não tem rating próprio).
+  5) Normaliza pro schema do dashboard e separa Galo (squad) do resto (pool).
+
+Rode:  python build_snapshot.py
+Requisitos: ver requirements.txt e README.md (precisa do transfermarkt-api no ar).
+"""
+import json, os, re, time, sys
+import requests
+import pandas as pd
+from unidecode import unidecode
+from rapidfuzz import process, fuzz
+
+# Garante que o config.py (na mesma pasta deste arquivo) seja encontrado,
+# não importa de qual diretório você rode o script.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import config as C  # noqa: E402
+
+
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+def norm_name(s: str) -> str:
+    s = unidecode(str(s or "")).lower()
+    s = re.sub(r"[^a-z\s]", " ", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def nat_code(nationality) -> str:
+    if isinstance(nationality, list):
+        nationality = nationality[0] if nationality else ""
+    nationality = str(nationality or "")
+    return C.NAT_CODE.get(nationality, unidecode(nationality)[:3].upper() or "—")
+
+
+def parse_market_value(v) -> float:
+    """Devolve valor em milhões de euros (float)."""
+    if v is None:
+        return 0.0
+    if isinstance(v, (int, float)):
+        return round(float(v) / 1_000_000, 2) if v > 10000 else float(v)
+    s = str(v).lower().replace("€", "").replace("\u20ac", "").strip()
+    mult = 1.0
+    if s.endswith("m"):
+        mult, s = 1.0, s[:-1]
+    elif s.endswith("k"):
+        mult, s = 0.001, s[:-1]
+    try:
+        return round(float(s.replace(",", "")) * mult, 2)
+    except ValueError:
+        return 0.0
+
+
+def year_of(contract) -> str:
+    m = re.search(r"(19|20)\d{2}", str(contract or ""))
+    return m.group(0) if m else "—"
+
+
+def safe_int(v):
+    """Converte para int sem quebrar (idade pode vir nula/estranha)."""
+    try:
+        return int(float(str(v)))
+    except (ValueError, TypeError):
+        return None
+
+
+# ----------------------------------------------------------------------------
+# Camada Transfermarkt
+# ----------------------------------------------------------------------------
+def tm_get(path: str):
+    url = f"{C.TM_BASE}{path}"
+    for attempt in range(4):
+        try:
+            r = requests.get(url, timeout=C.TM_TIMEOUT)
+            if r.status_code == 429:           # rate limit -> espera e tenta de novo
+                time.sleep(3 + attempt * 2)
+                continue
+            r.raise_for_status()
+            time.sleep(C.TM_DELAY)
+            return r.json()
+        except requests.RequestException as e:
+            print(f"  ! TM falhou ({path}): {e}")
+            time.sleep(2 + attempt)
+    return None
+
+
+def get_competition_clubs(comp_id, season):
+    data = tm_get(f"/competitions/{comp_id}/clubs?season_id={season}")
+    return (data or {}).get("clubs", []) if data else []
+
+
+def get_club_players(club_id, season=None):
+    # Sem season_id o serviço devolve o ELENCO ATUAL (o que queremos p/ scouting).
+    data = tm_get(f"/clubs/{club_id}/players")
+    players = (data or {}).get("players", []) if data else []
+    # Fallback: se vier vazio, tenta com a temporada configurada.
+    if not players and season:
+        data = tm_get(f"/clubs/{club_id}/players?season_id={season}")
+        players = (data or {}).get("players", []) if data else []
+    return players
+
+
+def build_universe():
+    """Monta a lista de jogadores (espinha) a partir do Transfermarkt."""
+    players, seen = [], set()
+    for comp_id, season, market, fbref_league in C.COMPETITIONS:
+        print(f"\n[TM] Competição {comp_id} (season {season}) — {market}")
+        clubs = get_competition_clubs(comp_id, season)
+        print(f"     {len(clubs)} clubes")
+        for club in clubs:
+            cid, cname = club.get("id"), club.get("name", "")
+            roster = get_club_players(cid, season)
+            for p in roster:
+                try:
+                    pid = p.get("id")
+                    name = (p.get("name") or "").strip()
+                    if not pid or pid in seen or not name:
+                        continue
+                    seen.add(pid)
+                    tm_pos = p.get("position") or ""
+                    players.append({
+                        "id": str(pid),
+                        "name": name,
+                        "pos": C.TM_POSITION_MAP.get(tm_pos, "MEI"),   # default neutro
+                        "tm_pos_raw": tm_pos,
+                        "age": safe_int(p.get("age")),
+                        "nat": nat_code(p.get("nationality")),
+                        "club": cname,
+                        "market": market,
+                        "val": parse_market_value(p.get("marketValue")),
+                        "contract": year_of(p.get("contract")),
+                        "fbref_league": fbref_league,
+                        "_norm": norm_name(name),
+                    })
+                except Exception as e:
+                    print(f"     (pulando jogador problemático em {cname}: {e})")
+                    continue
+            print(f"     · {cname}: {len(roster)} jogadores")
+    print(f"\n[TM] Universo total: {len(players)} jogadores")
+    return players
+
+
+# ----------------------------------------------------------------------------
+# Camada FBref (soccerdata)
+# ----------------------------------------------------------------------------
+def _leaf(col):
+    """Último nível de uma coluna (MultiIndex ou simples)."""
+    return col[-1] if isinstance(col, tuple) else col
+
+
+def _group(col):
+    return " ".join(str(x) for x in col[:-1]) if isinstance(col, tuple) else ""
+
+
+def pick(row, df_cols, leaf, group_hint=None):
+    """Pega o valor de uma coluna pelo nome do nível final, com dica de grupo."""
+    cands = [c for c in df_cols if _leaf(c) == leaf]
+    if not cands:
+        return None
+    if group_hint:
+        pref = [c for c in cands if group_hint.lower() in _group(c).lower()]
+        if pref:
+            cands = pref
+    try:
+        v = row[cands[0]]
+        return float(v) if pd.notna(v) else None
+    except Exception:
+        return None
+
+
+def fetch_fbref(league, season):
+    """Retorna {nome_normalizado: {stat: valor}} para uma liga/temporada do FBref."""
+    import soccerdata as sd
+    out = {}
+    try:
+        fb = sd.FBref(leagues=league, seasons=season)
+    except Exception as e:
+        print(f"  ! FBref não inicializou para {league}: {e}")
+        return out
+
+    # soccerdata 1.9.0 só aceita estes tipos por temporada. Felizmente:
+    #  - 'standard' traz xG, xA (xAG) e passes progressivos (PrgP)
+    #  - 'misc' traz interceptações (Int) e desarmes ganhos (TklW)
+    frames = {}
+    for st in ["standard", "shooting", "misc", "keeper"]:
+        try:
+            frames[st] = fb.read_player_season_stats(stat_type=st)
+        except Exception as e:
+            print(f"  · sem '{st}' em {league} ({type(e).__name__})")
+
+    std = frames.get("standard")
+    if std is None or std.empty:
+        print(f"  ! FBref sem dados 'standard' para {league}")
+        return out
+
+    def idx_name(ix):  # o índice traz o nome do jogador em algum nível
+        if isinstance(ix, tuple):
+            for part in reversed(ix):
+                if isinstance(part, str) and not part.isdigit():
+                    return part
+            return ix[-1]
+        return ix
+
+    for ix, r in std.iterrows():
+        name = idx_name(ix)
+        nn = norm_name(name)
+        if not nn:
+            continue
+        cols = std.columns
+        rec = {
+            "apps": pick(r, cols, "MP"),
+            "min": pick(r, cols, "Min", "Playing"),
+            "g": pick(r, cols, "Gls", "Performance"),
+            "a": pick(r, cols, "Ast", "Performance"),
+            "xg": pick(r, cols, "xG", "Expected"),
+            "xa": pick(r, cols, "xAG", "Expected"),
+            "prog": pick(r, cols, "PrgP", "Progression"),
+        }
+        # demais stat_types (casados pelo mesmo nome de jogador)
+        # Int e TklW saem da tabela 'misc' (grupo Performance); aéreos do grupo Aerial.
+        for st, leaf, grp, key in [
+            ("shooting", "SoT", "Standard", "sot"),
+            ("misc", "Int", "Performance", "intc"),
+            ("misc", "TklW", "Performance", "tkl"),
+            ("misc", "Won", "Aerial", "aerial"),
+            ("keeper", "Saves", None, "sav"),
+            ("keeper", "Save%", None, "savePct"),
+            ("keeper", "CS", None, "cs"),
+        ]:
+            f = frames.get(st)
+            if f is None or f.empty:
+                continue
+            match = f[f.index.map(lambda i: norm_name(idx_name(i)) == nn)]
+            if len(match):
+                rec[key] = pick(match.iloc[0], f.columns, leaf, grp)
+        out[nn] = {k: v for k, v in rec.items() if v is not None}
+    print(f"  ✓ FBref {league}: {len(out)} jogadores com stats")
+    return out
+
+
+def enrich_with_fbref(players):
+    """Casa cada jogador do TM com o FBref por nome (fuzzy) dentro da liga."""
+    by_league = {}
+    for p in players:
+        if p["fbref_league"]:
+            by_league.setdefault(p["fbref_league"], []).append(p)
+
+    for league, group in by_league.items():
+        season = C.FBREF_SEASON_BR if league.startswith("BRA") else C.FBREF_SEASON_EURO
+        print(f"\n[FBref] {league} (season {season}) — {len(group)} alvos")
+        fb = fetch_fbref(league, season)
+        if not fb:
+            continue
+        fb_keys = list(fb.keys())
+        for p in group:
+            hit = process.extractOne(p["_norm"], fb_keys, scorer=fuzz.token_sort_ratio,
+                                     score_cutoff=85)
+            if hit:
+                p.update(fb[hit[0]])
+    return players
+
+
+# ----------------------------------------------------------------------------
+# Nota derivada (FBref não fornece rating)
+# ----------------------------------------------------------------------------
+RATING_METRICS = {
+    "GOL": ["sav", "savePct", "cs"],
+    "ZAG": ["tkl", "intc", "aerial", "passAcc"],
+    "LD":  ["tkl", "intc", "drib", "keyP", "a"],
+    "LE":  ["tkl", "intc", "drib", "keyP", "a"],
+    "VOL": ["tkl", "intc", "prog", "passAcc", "keyP"],
+    "MEI": ["keyP", "a", "xa", "drib", "g", "xg"],
+    "PON": ["drib", "keyP", "a", "xa", "g", "sot"],
+    "ATA": ["g", "xg", "sot", "aerial", "a"],
+}
+VOLUME = {"g", "a", "xg", "xa", "sot", "keyP", "drib", "tkl", "intc", "prog", "sav"}
+
+
+def add_derived_rating(players):
+    df = pd.DataFrame(players)
+    for col in set(sum(RATING_METRICS.values(), [])) | {"min"}:
+        if col not in df:
+            df[col] = 0.0
+    df = df.fillna({c: 0.0 for c in df.columns if df[c].dtype != object})
+
+    def p90(row, m):
+        mins = row.get("min") or 0
+        return (row[m] / (mins / 90)) if (m in VOLUME and mins and mins > 0) else row.get(m, 0)
+
+    ratings = pd.Series(6.5, index=df.index)
+    for pos, metrics in RATING_METRICS.items():
+        mask = df["pos"] == pos
+        sub = df[mask]
+        if len(sub) < 3:
+            continue
+        score = pd.Series(0.0, index=sub.index)
+        for m in metrics:
+            vals = sub.apply(lambda r: p90(r, m), axis=1)
+            rank = vals.rank(pct=True)            # percentil 0..1 dentro da posição
+            score += rank
+        score /= max(len(metrics), 1)
+        ratings.loc[sub.index] = (5.9 + 2.1 * score).round(2).clip(5.5, 8.5)
+    df["rating"] = ratings
+    return df.to_dict("records")
+
+
+# ----------------------------------------------------------------------------
+# Normalização final + escrita
+# ----------------------------------------------------------------------------
+SCHEMA = ["id", "name", "pos", "age", "nat", "club", "market", "val", "contract",
+          "apps", "min", "g", "a", "xg", "xa", "passAcc", "keyP", "prog", "tkl",
+          "intc", "drib", "aerial", "duels", "sot", "sav", "cs", "savePct", "rating"]
+
+
+def normalize(players):
+    out = []
+    for p in players:
+        rec = {}
+        for k in SCHEMA:
+            v = p.get(k)
+            if v is None:
+                v = 0 if k not in ("name", "pos", "nat", "club", "market", "contract", "id") else ""
+            if isinstance(v, float):
+                v = round(v, 2)
+            rec[k] = v
+        if not rec.get("age"):
+            rec["age"] = 0
+        out.append(rec)
+    return out
+
+
+def main():
+    print("=== Galo Scout — build snapshot ===")
+    players = build_universe()
+    if not players:
+        print("\nERRO: nenhum jogador veio do Transfermarkt. O serviço está no ar em "
+              f"{C.TM_BASE}? Veja o README.")
+        sys.exit(1)
+
+    players = enrich_with_fbref(players)
+    players = add_derived_rating(players)
+    players = normalize(players)
+
+    # Separa o Galo do resto pela grafia do clube (robusto a acento/variações).
+    def is_galo(club):
+        return "mineiro" in unidecode(str(club)).lower()
+    squad = [p for p in players if is_galo(p["club"])]
+    pool = [p for p in players if not is_galo(p["club"])]
+
+    os.makedirs(C.OUTPUT_DIR, exist_ok=True)
+    meta = {"generated_at": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
+            "source": "Transfermarkt (valores/posição) + FBref (stats/xG)",
+            "note": "Nota é derivada (percentis por posição), não rating oficial."}
+
+    with open(os.path.join(C.OUTPUT_DIR, "squad.json"), "w", encoding="utf-8") as f:
+        json.dump({"meta": meta, "players": squad}, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(C.OUTPUT_DIR, "pool.json"), "w", encoding="utf-8") as f:
+        json.dump({"meta": meta, "players": pool}, f, ensure_ascii=False, indent=2)
+
+    print(f"\n✓ squad.json: {len(squad)} jogadores (Galo)")
+    print(f"✓ pool.json:  {len(pool)} jogadores (mercado)")
+    print(f"  em {os.path.abspath(C.OUTPUT_DIR)}")
+
+
+if __name__ == "__main__":
+    main()
