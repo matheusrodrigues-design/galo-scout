@@ -65,3 +65,25 @@ NAT_CODE = {
     "France": "FRA", "Germany": "GER", "England": "ENG", "Italy": "ITA",
     "Netherlands": "NED", "Belgium": "BEL",
 }
+
+# --- Pesos da NOTA derivada, por posição (sua filosofia de avaliação) ---
+# A nota de cada jogador é a média PONDERADA dos seus percentis nestas métricas,
+# dentro da própria posição. Aumente o peso do que você valoriza; peso 0 ignora.
+# Você pode adicionar/remover métricas livremente (use os códigos do schema:
+# g, a, xg, xa, prog, sot, tkl, intc, aerial, sav, savePct, cs, e — se um dia
+# tiver fonte — keyP, passAcc, drib).
+# OBS: keyP/passAcc/drib não vêm do soccerdata 1.9.0 hoje, então foram deixados
+# de fora dos padrões (peso neles seria neutro, pois o valor é 0 para todos).
+RATING_WEIGHTS = {
+    "GOL": {"sav": 1.0, "savePct": 2.0, "cs": 1.5},
+    "ZAG": {"tkl": 1.5, "intc": 1.5, "aerial": 1.5, "prog": 0.5},
+    "LD":  {"tkl": 1.0, "intc": 1.0, "prog": 1.5, "a": 1.0, "sot": 0.5},
+    "LE":  {"tkl": 1.0, "intc": 1.0, "prog": 1.5, "a": 1.0, "sot": 0.5},
+    "VOL": {"tkl": 1.5, "intc": 1.5, "prog": 1.5},
+    "MEI": {"a": 1.5, "xa": 1.5, "g": 1.0, "xg": 1.0, "prog": 1.0},
+    "PON": {"a": 1.5, "xa": 1.5, "g": 1.5, "xg": 1.5, "sot": 1.0},
+    "ATA": {"g": 2.0, "xg": 2.0, "sot": 1.5, "aerial": 1.0, "a": 1.0},
+}
+
+# Faixa final da nota (mínimo, máximo). Padrão parecido com nota de jogo (0–10).
+RATING_RANGE = (5.8, 8.4)

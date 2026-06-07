@@ -293,45 +293,40 @@ def enrich_with_fbref(players):
 
 
 # ----------------------------------------------------------------------------
-# Nota derivada (FBref não fornece rating)
+# Nota derivada (FBref não fornece rating) — usa os pesos de config.RATING_WEIGHTS
 # ----------------------------------------------------------------------------
-RATING_METRICS = {
-    "GOL": ["sav", "savePct", "cs"],
-    "ZAG": ["tkl", "intc", "aerial", "passAcc"],
-    "LD":  ["tkl", "intc", "drib", "keyP", "a"],
-    "LE":  ["tkl", "intc", "drib", "keyP", "a"],
-    "VOL": ["tkl", "intc", "prog", "passAcc", "keyP"],
-    "MEI": ["keyP", "a", "xa", "drib", "g", "xg"],
-    "PON": ["drib", "keyP", "a", "xa", "g", "sot"],
-    "ATA": ["g", "xg", "sot", "aerial", "a"],
-}
-VOLUME = {"g", "a", "xg", "xa", "sot", "keyP", "drib", "tkl", "intc", "prog", "sav"}
+# Métricas de "volume" (contagens) são convertidas para por-90 antes de ranquear;
+# percentuais (savePct/passAcc) e contagens estáveis (cs) entram como vêm.
+VOLUME = {"g", "a", "xg", "xa", "sot", "keyP", "drib", "tkl", "intc", "prog", "sav", "aerial"}
 
 
 def add_derived_rating(players):
     df = pd.DataFrame(players)
-    for col in set(sum(RATING_METRICS.values(), [])) | {"min"}:
+    all_metrics = set().union(*[set(d) for d in C.RATING_WEIGHTS.values()]) if C.RATING_WEIGHTS else set()
+    for col in all_metrics | {"min"}:
         if col not in df:
             df[col] = 0.0
-    df = df.fillna({c: 0.0 for c in df.columns if df[c].dtype != object})
+    num_cols = [c for c in df.columns if df[c].dtype != object]
+    df[num_cols] = df[num_cols].fillna(0.0)
 
     def p90(row, m):
         mins = row.get("min") or 0
         return (row[m] / (mins / 90)) if (m in VOLUME and mins and mins > 0) else row.get(m, 0)
 
-    ratings = pd.Series(6.5, index=df.index)
-    for pos, metrics in RATING_METRICS.items():
-        mask = df["pos"] == pos
-        sub = df[mask]
-        if len(sub) < 3:
+    lo, hi = C.RATING_RANGE
+    span = hi - lo
+    ratings = pd.Series(round((lo + hi) / 2, 2), index=df.index)
+    for pos, wmap in C.RATING_WEIGHTS.items():
+        sub = df[df["pos"] == pos]
+        total_w = sum(wmap.values())
+        if len(sub) < 3 or total_w <= 0:
             continue
         score = pd.Series(0.0, index=sub.index)
-        for m in metrics:
+        for m, wt in wmap.items():
             vals = sub.apply(lambda r: p90(r, m), axis=1)
-            rank = vals.rank(pct=True)            # percentil 0..1 dentro da posição
-            score += rank
-        score /= max(len(metrics), 1)
-        ratings.loc[sub.index] = (5.9 + 2.1 * score).round(2).clip(5.5, 8.5)
+            score += wt * vals.rank(pct=True)     # percentil 0..1 ponderado
+        score /= total_w
+        ratings.loc[sub.index] = (lo + span * score).round(2).clip(lo, hi)
     df["rating"] = ratings
     return df.to_dict("records")
 
