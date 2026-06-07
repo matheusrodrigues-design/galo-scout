@@ -604,8 +604,14 @@ function SubstitutoView({ squad, pool, universe, target, setTarget, maxBudget, s
   const samePos = universe.filter((p) => compat.includes(p.pos));
   const rg = ranges(metrics, samePos);
 
+  // pesos por estatística (1 = normal) + equilíbrio similaridade × qualidade
+  const [weights, setWeights] = useState({});
+  const [simBalance, setSimBalance] = useState(55);   // % do fit vindo da similaridade
+  const w = (m) => (weights[m] ?? 1);
+  const setW = (m, v) => setWeights((prev) => ({ ...prev, [m]: v }));
+  const sb = simBalance / 100;
+
   const tVec = metrics.map((m) => norm(target[m] ?? 0, rg[m]));
-  const tQuality = norm(target.rating, ranges(["rating"], samePos)["rating"]);
   const ratingRg = ranges(["rating"], samePos)["rating"];
 
   const candidates = pool
@@ -614,10 +620,11 @@ function SubstitutoView({ squad, pool, universe, target, setTarget, maxBudget, s
     .filter((c) => marketFilter === "Todos" || c.market === marketFilter)
     .map((c) => {
       const cVec = metrics.map((m) => norm(c[m] ?? 0, rg[m]));
-      const dist = avg(cVec.map((v, i) => Math.abs(v - tVec[i])));
-      const sim = 1 - dist;                               // similaridade de perfil
+      const den = metrics.reduce((s, m) => s + w(m), 0) || 1;
+      const dist = metrics.reduce((s, m, i) => s + w(m) * Math.abs(cVec[i] - tVec[i]), 0) / den;
+      const sim = 1 - dist;                               // similaridade ponderada de perfil
       const quality = norm(c.rating, ratingRg);           // qualidade absoluta
-      const fit = Math.round(100 * (0.55 * sim + 0.45 * quality));
+      const fit = Math.round(100 * (sb * sim + (1 - sb) * quality));
       const upgrade = +(c.rating - target.rating).toFixed(2);
       const efficiency = +(fit / Math.max(c.val, 0.5)).toFixed(1);
       return { ...c, fit, sim: Math.round(sim * 100), quality: Math.round(quality * 100), upgrade, efficiency };
@@ -663,6 +670,40 @@ function SubstitutoView({ squad, pool, universe, target, setTarget, maxBudget, s
         </div>
         <div style={{ marginTop: 12, fontSize: 12, color: C.muted }}>
           Posições compatíveis: {compat.map((p) => POS_LABEL[p]).join(", ")} · perfil comparado em {metrics.length} métricas · <strong style={{ color: C.text }}>{candidates.length}</strong> alvos no filtro.
+        </div>
+      </div>
+
+      {/* pesos das estatísticas */}
+      <div className="gs-card" style={{ padding: 16 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 6 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, fontWeight: 700 }}>
+            <Activity size={16} color={C.accent} /> Pesos das estatísticas
+          </div>
+          <button className="gs-btn" onClick={() => { setWeights({}); setSimBalance(55); }}>Redefinir</button>
+        </div>
+        <div style={{ color: C.muted, fontSize: 12, marginBottom: 16 }}>
+          Defina o quanto cada estatística pesa no encaixe. <strong style={{ color: C.text }}>0×</strong> ignora, <strong style={{ color: C.text }}>1×</strong> é normal, <strong style={{ color: C.text }}>3×</strong> é o triplo. O ranking abaixo recalcula na hora.
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(170px,1fr))", gap: 14 }}>
+          {metrics.map((m) => (
+            <div key={m}>
+              <label style={{ fontSize: 12, display: "flex", justifyContent: "space-between" }}>
+                <span style={{ color: w(m) === 0 ? C.muted : C.text }}>{METRIC_LABEL[m]}</span>
+                <span className="gs-mono" style={{ color: w(m) === 0 ? C.muted : C.accent }}>{w(m).toFixed(1)}×</span>
+              </label>
+              <input type="range" min={0} max={3} step={0.5} value={w(m)} onChange={(e) => setW(m, +e.target.value)} style={{ width: "100%", marginTop: 8 }} />
+            </div>
+          ))}
+        </div>
+        <div style={{ marginTop: 16, paddingTop: 14, borderTop: `1px solid ${C.line}` }}>
+          <label style={{ fontSize: 12, display: "flex", justifyContent: "space-between" }}>
+            <span style={{ color: C.text }}>Equilíbrio do fit</span>
+            <span className="gs-mono" style={{ color: C.accent }}>{simBalance}% parecido · {100 - simBalance}% qualidade</span>
+          </label>
+          <input type="range" min={0} max={100} step={5} value={simBalance} onChange={(e) => setSimBalance(+e.target.value)} style={{ width: "100%", marginTop: 10 }} />
+          <div style={{ color: C.muted, fontSize: 11, marginTop: 8 }}>
+            Mais à esquerda = prioriza quem joga parecido com o jogador de referência. Mais à direita = prioriza quem tem a maior nota, mesmo com perfil diferente.
+          </div>
         </div>
       </div>
 
@@ -742,7 +783,7 @@ function SubstitutoView({ squad, pool, universe, target, setTarget, maxBudget, s
           </div>
         )}
         <div style={{ marginTop: 12, fontSize: 11, color: C.muted, lineHeight: 1.6 }}>
-          <strong style={{ color: C.text }}>Fit</strong> = 55% similaridade de perfil + 45% qualidade absoluta (nota). <strong style={{ color: C.text }}>Δ Nota</strong> = upgrade/downgrade vs. o jogador de referência. <strong style={{ color: C.text }}>Custo-benefício</strong> = fit por €M. Ajuste os pesos na função do código conforme sua filosofia de scouting.
+          <strong style={{ color: C.text }}>Fit</strong> = mistura de similaridade de perfil (ponderada pelos pesos acima) e qualidade absoluta (nota), no equilíbrio que você definiu. <strong style={{ color: C.text }}>Δ Nota</strong> = upgrade/downgrade vs. o jogador de referência. <strong style={{ color: C.text }}>Custo-benefício</strong> = fit por €M.
         </div>
       </div>
     </div>
