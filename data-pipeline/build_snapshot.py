@@ -246,15 +246,21 @@ def fetch_fbref(league, season):
             "a": pick(r, cols, "Ast", "Performance"),
             "xg": pick(r, cols, "xG", "Expected"),
             "xa": pick(r, cols, "xAG", "Expected"),
+            "npxg": pick(r, cols, "npxG", "Expected"),
             "prog": pick(r, cols, "PrgP", "Progression"),
+            "prgC": pick(r, cols, "PrgC", "Progression"),
+            "prgR": pick(r, cols, "PrgR", "Progression"),
         }
         # demais stat_types (casados pelo mesmo nome de jogador)
         # Int e TklW saem da tabela 'misc' (grupo Performance); aéreos do grupo Aerial.
         for st, leaf, grp, key in [
             ("shooting", "SoT", "Standard", "sot"),
+            ("shooting", "Sh", "Standard", "sh"),
             ("misc", "Int", "Performance", "intc"),
             ("misc", "TklW", "Performance", "tkl"),
             ("misc", "Won", "Aerial", "aerial"),
+            ("misc", "Fld", "Performance", "fld"),
+            ("misc", "Recov", "Performance", "recov"),
             ("keeper", "Saves", None, "sav"),
             ("keeper", "Save%", None, "savePct"),
             ("keeper", "CS", None, "cs"),
@@ -289,6 +295,36 @@ def enrich_with_fbref(players):
                                      score_cutoff=85)
             if hit:
                 p.update(fb[hit[0]])
+    return players
+
+
+def enrich_with_fbref_extra(players):
+    """Raspador dedicado: passes-chave, % de passe e dribles (passing/possession/defense)."""
+    if not getattr(C, "USE_FBREF_EXTRA", False):
+        return players
+    try:
+        import fbref_extra
+    except Exception as e:
+        print(f"\n[FBref extra] módulo indisponível ({e}) — pulando.")
+        return players
+
+    by_league = {}
+    for p in players:
+        if p["fbref_league"]:
+            by_league.setdefault(p["fbref_league"], []).append(p)
+
+    for league, group in by_league.items():
+        season = C.FBREF_SEASON_BR if league.startswith("BRA") else C.FBREF_SEASON_EURO
+        print(f"\n[FBref extra] {league} — passes-chave / passe% / dribles")
+        extra = fbref_extra.fetch_extra(league, season)
+        if not extra:
+            continue
+        keys = list(extra.keys())
+        for p in group:
+            hit = process.extractOne(p["_norm"], keys, scorer=fuzz.token_sort_ratio,
+                                     score_cutoff=85)
+            if hit:
+                p.update(extra[hit[0]])
     return players
 
 
@@ -335,8 +371,9 @@ def add_derived_rating(players):
 # Normalização final + escrita
 # ----------------------------------------------------------------------------
 SCHEMA = ["id", "name", "pos", "age", "nat", "club", "market", "val", "contract",
-          "apps", "min", "g", "a", "xg", "xa", "passAcc", "keyP", "prog", "tkl",
-          "intc", "drib", "aerial", "duels", "sot", "sav", "cs", "savePct", "rating"]
+          "apps", "min", "g", "a", "xg", "xa", "npxg", "passAcc", "keyP", "prog",
+          "prgC", "prgR", "tkl", "tklTot", "intc", "drib", "aerial", "duels", "sot",
+          "sh", "fld", "recov", "sav", "cs", "savePct", "rating"]
 
 
 def normalize(players):
@@ -365,6 +402,7 @@ def main():
         sys.exit(1)
 
     players = enrich_with_fbref(players)
+    players = enrich_with_fbref_extra(players)
     players = add_derived_rating(players)
     players = normalize(players)
 

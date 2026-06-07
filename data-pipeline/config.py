@@ -44,6 +44,11 @@ COMPETITIONS = [
 FBREF_SEASON_EURO = os.environ.get("FBREF_SEASON_EURO", "2025-2026")
 FBREF_SEASON_BR = os.environ.get("FBREF_SEASON_BR", "2026")
 
+# Raspador dedicado (fbref_extra.py): busca passing/possession/defense para obter
+# passes-chave, % de passe e dribles — que o soccerdata não expõe. É mais lento
+# (raspa páginas extras), mas usa o mesmo motor/cache. Desligue se quiser rapidez.
+USE_FBREF_EXTRA = os.environ.get("USE_FBREF_EXTRA", "1") == "1"
+
 # --- Mapa de posições do Transfermarkt -> os 8 códigos do dashboard ---
 # Ajuste conforme sua leitura tática (ex.: Central Midfield como VOL ou MEI).
 TM_POSITION_MAP = {
@@ -74,15 +79,17 @@ NAT_CODE = {
 # tiver fonte — keyP, passAcc, drib).
 # OBS: keyP/passAcc/drib não vêm do soccerdata 1.9.0 hoje, então foram deixados
 # de fora dos padrões (peso neles seria neutro, pois o valor é 0 para todos).
+# OBS: com o raspador (USE_FBREF_EXTRA=1) passam a existir keyP (passes-chave),
+# passAcc (% de passe) e drib (dribles). Sem o raspador, deixe esses com peso 0.
 RATING_WEIGHTS = {
     "GOL": {"sav": 1.0, "savePct": 2.0, "cs": 1.5},
-    "ZAG": {"tkl": 1.5, "intc": 1.5, "aerial": 1.5, "prog": 0.5},
-    "LD":  {"tkl": 1.0, "intc": 1.0, "prog": 1.5, "a": 1.0, "sot": 0.5},
-    "LE":  {"tkl": 1.0, "intc": 1.0, "prog": 1.5, "a": 1.0, "sot": 0.5},
-    "VOL": {"tkl": 1.5, "intc": 1.5, "prog": 1.5},
-    "MEI": {"a": 1.5, "xa": 1.5, "g": 1.0, "xg": 1.0, "prog": 1.0},
-    "PON": {"a": 1.5, "xa": 1.5, "g": 1.5, "xg": 1.5, "sot": 1.0},
-    "ATA": {"g": 2.0, "xg": 2.0, "sot": 1.5, "aerial": 1.0, "a": 1.0},
+    "ZAG": {"tkl": 1.0, "intc": 1.5, "aerial": 1.5, "passAcc": 1.0, "prog": 0.5},
+    "LD":  {"tkl": 1.0, "intc": 1.0, "prog": 1.0, "keyP": 1.0, "drib": 1.0, "a": 1.0},
+    "LE":  {"tkl": 1.0, "intc": 1.0, "prog": 1.0, "keyP": 1.0, "drib": 1.0, "a": 1.0},
+    "VOL": {"tkl": 1.5, "intc": 1.5, "prog": 1.5, "passAcc": 1.0, "keyP": 0.5},
+    "MEI": {"keyP": 1.5, "a": 1.5, "xa": 1.5, "drib": 1.0, "g": 1.0, "xg": 1.0},
+    "PON": {"drib": 1.5, "keyP": 1.5, "a": 1.5, "xa": 1.5, "g": 1.5, "sot": 1.0},
+    "ATA": {"g": 2.0, "npxg": 2.0, "sot": 1.5, "sh": 0.5, "aerial": 1.0, "a": 1.0},
 }
 
 # Faixa final da nota (mínimo, máximo). Padrão parecido com nota de jogo (0–10).
