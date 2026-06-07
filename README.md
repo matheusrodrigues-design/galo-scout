@@ -23,7 +23,7 @@ Abra o endereço que aparecer (ex.: http://localhost:5173).
    git add .
    git commit -m "Galo Scout - inicial"
    git branch -M main
-   git remote add origin https://github.com/SEU_USUARIO/galo-scout.git
+   git remote add origin https://github.com/matheusrodrigues-design/galo-scout.git
    git push -u origin main
    ```
 2. Em vercel.com → **Add New → Project → Import** o repositório.

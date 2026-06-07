@@ -77,17 +77,39 @@ def safe_int(v):
 # ----------------------------------------------------------------------------
 # Camada Transfermarkt
 # ----------------------------------------------------------------------------
+TM_CACHE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".tm_cache")
+
+
+def _cache_path(path: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9]+", "_", path).strip("_")
+    return os.path.join(TM_CACHE_DIR, safe + ".json")
+
+
 def tm_get(path: str):
+    # 1) Cache em disco: clube/competição já baixado não é buscado de novo.
+    cp = _cache_path(path)
+    if os.path.exists(cp):
+        try:
+            with open(cp, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    # 2) Busca na API local, com retry educado para instabilidades.
     url = f"{C.TM_BASE}{path}"
     for attempt in range(4):
         try:
             r = requests.get(url, timeout=C.TM_TIMEOUT)
-            if r.status_code == 429:           # rate limit -> espera e tenta de novo
-                time.sleep(3 + attempt * 2)
+            if r.status_code in (429, 500, 502, 503):   # serviço instável -> espera e retenta
+                print(f"  · TM {r.status_code} em {path} — retry {attempt + 1}/4")
+                time.sleep(3 + attempt * 3)
                 continue
             r.raise_for_status()
+            data = r.json()
+            os.makedirs(TM_CACHE_DIR, exist_ok=True)    # salva no cache só respostas boas
+            with open(cp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
             time.sleep(C.TM_DELAY)
-            return r.json()
+            return data
         except requests.RequestException as e:
             print(f"  ! TM falhou ({path}): {e}")
             time.sleep(2 + attempt)
