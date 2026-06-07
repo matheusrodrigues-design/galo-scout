@@ -86,4 +86,4 @@ RATING_WEIGHTS = {
 }
 
 # Faixa final da nota (mínimo, máximo). Padrão parecido com nota de jogo (0–10).
-RATING_RANGE = (5.8, 8.4)
+RATING_RANGE = (0.0, 10.0)
